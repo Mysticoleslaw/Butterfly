@@ -12,7 +12,7 @@ Based on the [Ctorque Mech-Butterfly](https://github.com/) MicroPython code, rew
 - **Differential turning** — Aileron input makes one wing flap more than the other for yaw control.
 - **Per-wing trim** — Independent trim correction for left and right wings via aux channels.
 - **Battery monitoring** — ADC-based voltage reading with low-pass filter. Displays on serial and sends telemetry to transmitter.
-- **F.Port telemetry** — Battery voltage (VFAS) and percentage (Fuel) sent back to your FrSky transmitter via half-duplex F.Port.
+- **F.Port telemetry** — Battery voltage (VFAS) and percentage (Fuel) code included but currently disabled (F.Port set to RX-only due to GPIO 7 half-duplex conflict on ESP32-C3).
 - **Non-blocking** — F.Port is read every loop iteration; wing motion never blocks communication.
 - **WS2812 wing LEDs** — Addressable LED effects synced to flight state: rainbow wave during flapping, amber breathing when idle, red flash on failsafe, orange pulse on low battery.
 - **Failsafe** — Wings center and stop flapping if F.Port signal is lost for 500ms.
@@ -32,7 +32,7 @@ Based on the [Ctorque Mech-Butterfly](https://github.com/) MicroPython code, rew
 ## Wiring
 
 ```
-FrSky RXS-R P pad ──── GPIO 7   (F.Port, half-duplex)
+FrSky RXS-R P pad ──── GPIO 7   (F.Port, RX only)
 Left wing servo ─────── GPIO 4
 Right wing servo ────── GPIO 5
 Battery voltage divider  GPIO 0   (ADC input)
@@ -146,9 +146,22 @@ All parameters are defined as constants at the top of the `.ino` file:
 
 1. Open `ButterflyFlightController_V2.ino` in Arduino IDE
 2. Select board: **ESP32C3 Dev Module**
-3. Install libraries: **ESP32Servo** and **Adafruit NeoPixel**
-4. Connect the ESP32-C3 via USB
-5. Upload
+3. Set **USB CDC On Boot: Enabled** (required for serial monitor over USB)
+4. Install libraries: **ESP32Servo** and **Adafruit NeoPixel**
+5. Connect the ESP32-C3 via USB
+6. Upload
+
+Or via `arduino-cli`:
+
+```bash
+arduino-cli compile --fqbn esp32:esp32:esp32c3:CDCOnBoot=cdc ButterflyFlightController_V2
+arduino-cli upload --fqbn esp32:esp32:esp32c3:CDCOnBoot=cdc --port /dev/cu.usbmodem1101 ButterflyFlightController_V2
+```
+
+## Known Issues
+
+- **Servo amplitude drops at high flap speeds** — The sinusoidal wave commands positions faster than budget analog servos (e.g. ES08AII at ~0.10s/60°) can physically reach. At max throttle (320ms/cycle), servos can't complete the full sweep before the wave reverses. Fix: use faster digital servos (~0.05-0.06s/60°) like the KST X08 Plus, or increase `DELAY_MIN_MS` to cap speed to what your servos can handle.
+- **Telemetry disabled** — Half-duplex F.Port on GPIO 7 caused signal loss due to the open-drain configuration interfering with RX. Telemetry code remains in the sketch but the UART is set to RX-only. May work on a different GPIO or with a separate TX pin.
 
 ## Changes from V1
 
@@ -160,7 +173,7 @@ All parameters are defined as constants at the top of the `.ino` file:
 | Wing trims | None | ±20 deg per wing (Ch 5-6) |
 | Battery monitoring | None | ADC with low-pass filter |
 | Telemetry | None | VFAS + Fuel via F.Port |
-| F.Port direction | RX only | Half-duplex (RX + TX) |
+| F.Port direction | RX only | RX only (half-duplex telemetry code present but disabled) |
 | Flap speed control | Period 50-500ms | Step delay 8-16ms (smoother) |
 | Wing LEDs | None | WS2812 with 3 modes, RC-controlled brightness/color/on-off |
 
