@@ -1,0 +1,4 @@
+FrskySbus  KEYWORD1
+begin  KEYWORD2
+checkForNewMessage    KEYWORD2
+setValidFrameCountMin   KEYWORD2
