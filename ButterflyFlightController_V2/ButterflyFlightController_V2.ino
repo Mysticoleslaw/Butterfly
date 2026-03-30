@@ -22,7 +22,7 @@
  *   Ch 0  Throttle   -> Flap speed (low=slow, high=fast)
  *   Ch 1  Aileron    -> Turning (differential wing amplitude)
  *   Ch 2  Elevator   -> Pitch control (wing center offset)
- *   Ch 3  Rudder     -> Flap amplitude (small to large)
+ *   Ch 3  Rudder     -> (unused)
  *   Ch 4  Aux 1      -> Flap enable/disable (switch, >center = on)
  *   Ch 5  Aux 2      -> Left wing trim
  *   Ch 6  Aux 3      -> Right wing trim
@@ -36,9 +36,10 @@
  *   Fuel  -> Battery percentage
  *
  * Wiring:
- *   F.Port (receiver P pad) -> GPIO 7
- *   Left wing servo         -> GPIO 4
- *   Right wing servo        -> GPIO 5
+ *   F.Port (receiver P pad) -> GPIO 8
+ *   Left wing servo         -> GPIO 5
+ *   Right wing servo        -> GPIO 6
+ *   WS2812 LED chain        -> GPIO 3 (onboard LED is pixel 0, strip follows)
  *   Battery voltage divider  -> GPIO 0
  *   WS2812 LED data line    -> GPIO 3
  *
@@ -55,12 +56,12 @@
 #include "driver/gpio.h"
 
 // ── Pin Configuration ───────────────────────────────────────────────
-#define FPORT_RX_PIN    7
-#define SERVO_LEFT_PIN  4
-#define SERVO_RIGHT_PIN 5
+#define FPORT_RX_PIN    8
+#define SERVO_LEFT_PIN  5
+#define SERVO_RIGHT_PIN 6
 #define BATTERY_ADC_PIN 0   // Must be ADC-capable (GPIO 0-4 on ESP32-C3)
-#define LED_PIN         3   // WS2812 data line
-#define LED_COUNT       10  // Total LEDs on the strip (adjust to your setup)
+#define LED_PIN         10  // Onboard WS2812 on GPIO 10 (Waveshare C3-Zero), chain strip from data-out
+#define LED_COUNT       11  // Onboard LED + 10 strip LEDs (onboard is pixel 0)
 
 // ── UART for F.Port (half-duplex) ──────────────────────────────────
 HardwareSerial fportSerial(1);
@@ -118,24 +119,26 @@ const int SERVO_LIMIT_MIN = 0;
 const int SERVO_LIMIT_MAX = 180;
 
 // ── Sinusoidal Flap Parameters ──────────────────────────────────────
-// 40 steps per full cosine cycle (matches Ctorque's 20 up + 20 down)
+// 40 steps per full cosine cycle (matches Ctorque: 20 up + 20 down)
 const int   FLAP_STEPS      = 40;
 const float PHASE_INCREMENT = TWO_PI / FLAP_STEPS;
 
 // Step delay range (ms) — controls flap speed
-// Full cycle time = FLAP_STEPS * delay = 320ms (fast) to 640ms (slow)
-const int DELAY_MIN_MS = 8;   // Fastest (full throttle)
-const int DELAY_MAX_MS = 16;  // Slowest (zero throttle)
+// Full cycle time = FLAP_STEPS * delay = 376ms (fast) to 536ms (slow)
+const int DELAY_MIN_MS = 9;   // Fastest (full throttle) — matches Ctorque V5
+const int DELAY_MAX_MS = 13;  // Slowest (zero throttle) — matches Ctorque V5
 
-// Amplitude range (degrees from center)
-const float AMP_MIN = 20.0;
-const float AMP_MAX = 70.0;
+// Fixed amplitude (degrees from center) — full PWM range (500-2500us) gives true 180°
+const float FLAP_AMPLITUDE = 95.0;
 
 // Differential range for turning (degrees)
 const float DIFF_MAX = 20.0;
 
 // Pitch offset range (degrees)
 const float PITCH_MAX = 20.0;
+
+// Default pitch bias (degrees) — angles wings up for baseline lift
+const float PITCH_BIAS = 8.0;
 
 // Per-wing trim range (degrees)
 const float TRIM_MAX = 20.0;
@@ -176,6 +179,10 @@ const float RAINBOW_SPEED = 300.0;
 // ── Failsafe ────────────────────────────────────────────────────────
 const unsigned long FAILSAFE_TIMEOUT_MS = 500;
 
+// ── Debug Logging ───────────────────────────────────────────────────
+const unsigned long DEBUG_PRINT_INTERVAL_MS = 500;
+unsigned long lastDebugPrintTime = 0;
+
 // ── Runtime State ───────────────────────────────────────────────────
 
 // Flap state
@@ -185,7 +192,6 @@ bool          flappingEnabled = false;
 
 // Control values (updated each F.Port frame)
 int   servoDelayMs  = DELAY_MAX_MS;
-float amplitude     = 45.0;
 float differential  = 0.0;
 float pitchOffset   = 0.0;
 float leftTrim      = 0.0;
@@ -537,6 +543,13 @@ float mapFloat(uint16_t val, uint16_t inMin, uint16_t inMax,
 void setup() {
   Serial.begin(115200);
   while (!Serial && millis() < 3000);
+
+  // ── Quick LED test — blink onboard RGB red/green/blue ─────────────
+  neopixelWrite(10, 255, 0, 0);  delay(300);
+  neopixelWrite(10, 0, 255, 0);  delay(300);
+  neopixelWrite(10, 0, 0, 255);  delay(300);
+  neopixelWrite(10, 0, 0, 0);
+
   Serial.println("Butterfly Flight Controller V2 - Sinusoidal + Telemetry");
   Serial.println("Initializing...");
 
@@ -547,8 +560,8 @@ void setup() {
   Serial.println("F.Port initialized on GPIO 7 (RX only)");
 
   // ── Servos ────────────────────────────────────────────────────────
-  servoLeft.attach(SERVO_LEFT_PIN);
-  servoRight.attach(SERVO_RIGHT_PIN);
+  servoLeft.attach(SERVO_LEFT_PIN, 500, 2500);   // Full 180° range matching Ctorque
+  servoRight.attach(SERVO_RIGHT_PIN, 500, 2500);
   servoLeft.write(SERVO_CENTER);
   servoRight.write(SERVO_CENTER);
   Serial.print("Servos: Left GPIO ");
@@ -590,7 +603,7 @@ void setup() {
   Serial.println("  Ch0 Throttle  -> Flap speed");
   Serial.println("  Ch1 Aileron   -> Turn (differential)");
   Serial.println("  Ch2 Elevator  -> Pitch offset");
-  Serial.println("  Ch3 Rudder    -> Amplitude");
+  Serial.println("  Ch3 Rudder    -> (unused)");
   Serial.println("  Ch4 Aux1      -> Flap enable (switch)");
   Serial.println("  Ch5 Aux2      -> Left trim");
   Serial.println("  Ch6 Aux3      -> Right trim");
@@ -625,12 +638,6 @@ void loop() {
                                  DELAY_MAX_MS, DELAY_MIN_MS);
     servoDelayMs = constrain(servoDelayMs, DELAY_MIN_MS, DELAY_MAX_MS);
 
-    // Amplitude: rudder/knob -> wing sweep angle
-    amplitude = mapFloat(channels[CH_RUDDER],
-                         CH_MIN, CH_MAX,
-                         AMP_MIN, AMP_MAX);
-    amplitude = constrain(amplitude, AMP_MIN, AMP_MAX);
-
     // Turning: aileron -> differential (positive = turn right)
     differential = mapFloat(channels[CH_AILERON],
                             CH_MIN, CH_MAX,
@@ -638,9 +645,10 @@ void loop() {
     differential = constrain(differential, -DIFF_MAX, DIFF_MAX);
 
     // Pitch: elevator -> wing center offset (positive = nose up)
-    pitchOffset = mapFloat(channels[CH_ELEVATOR],
-                           CH_MIN, CH_MAX,
-                           -PITCH_MAX, PITCH_MAX);
+    // PITCH_BIAS adds baseline upward angle for lift at rest
+    pitchOffset = PITCH_BIAS + mapFloat(channels[CH_ELEVATOR],
+                                        CH_MIN, CH_MAX,
+                                        -PITCH_MAX, PITCH_MAX);
     pitchOffset = constrain(pitchOffset, -PITCH_MAX, PITCH_MAX);
 
     // Per-wing trims
@@ -676,6 +684,26 @@ void loop() {
     ledColorHue = (uint16_t)mapFloat(channels[CH_LED_COLOR],
                                      CH_MIN, CH_MAX, 0.0, 65535.0);
 
+    // Debug: dump channel values periodically
+    if (millis() - lastDebugPrintTime >= DEBUG_PRINT_INTERVAL_MS) {
+      lastDebugPrintTime = millis();
+      Serial.print("CH ");
+      for (int i = 0; i < 11; i++) {
+        Serial.print(i);
+        Serial.print(":");
+        Serial.print(channels[i]);
+        Serial.print(" ");
+      }
+      Serial.print("| LED en:");
+      Serial.print(ledEnabled);
+      Serial.print(" mode:");
+      Serial.print(ledMode);
+      Serial.print(" bright:");
+      Serial.print(ledBrightness);
+      Serial.print(" flap:");
+      Serial.println(flappingEnabled);
+    }
+
   } else if (frameResult == FRAME_POLL) {
     // Telemetry disabled (no TX pin) — ignore polls
   }
@@ -710,15 +738,34 @@ void loop() {
       // Mirrors the Ctorque formula — servos flap in opposition,
       // differential makes one wing sweep more than the other
       float leftAngle  = (SERVO_CENTER + leftTrim + pitchOffset)
-                         + (amplitude - differential) * cosVal;
+                         + (FLAP_AMPLITUDE - differential) * cosVal;
       float rightAngle = (SERVO_CENTER - rightTrim - pitchOffset)
-                         - (amplitude + differential) * cosVal;
+                         - (FLAP_AMPLITUDE + differential) * cosVal;
 
       int leftPos  = constrain((int)leftAngle,  SERVO_LIMIT_MIN, SERVO_LIMIT_MAX);
       int rightPos = constrain((int)rightAngle, SERVO_LIMIT_MIN, SERVO_LIMIT_MAX);
 
       servoLeft.write(leftPos);
       servoRight.write(rightPos);
+
+      // Debug: print flap state periodically
+      if (millis() - lastDebugPrintTime >= DEBUG_PRINT_INTERVAL_MS) {
+        lastDebugPrintTime = millis();
+        Serial.print("FLAP | amp:");
+        Serial.print(FLAP_AMPLITUDE, 1);
+        Serial.print(" delay:");
+        Serial.print(servoDelayMs);
+        Serial.print("ms cycle:");
+        Serial.print(servoDelayMs * FLAP_STEPS);
+        Serial.print("ms L:");
+        Serial.print(leftPos);
+        Serial.print(" R:");
+        Serial.print(rightPos);
+        Serial.print(" diff:");
+        Serial.print(differential, 1);
+        Serial.print(" pitch:");
+        Serial.println(pitchOffset, 1);
+      }
 
       // Advance phase
       flapPhase += PHASE_INCREMENT;
